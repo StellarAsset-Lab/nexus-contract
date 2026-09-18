@@ -7,8 +7,10 @@ mod types;
 
 use error::ContractError;
 use events::{AdminTransferCancelled, AdminTransferProposed, AdminTransferred};
+use events::{AssetDeactivated, AssetRegistered};
 use soroban_sdk::{contract, contractimpl, Address, Env};
 use storage::DataKey;
+use types::AssetRecord;
 
 #[contract]
 pub struct Registry;
@@ -103,6 +105,68 @@ impl Registry {
         AdminTransferCancelled { pending_admin }.publish(&env);
 
         Ok(())
+    }
+
+    pub fn register_asset(env: Env, asset: Address, issuer: Address) -> Result<(), ContractError> {
+        Self::require_initialized(&env)?;
+
+        let admin = Self::admin(env.clone());
+        admin.require_auth();
+
+        let key = DataKey::Asset(asset.clone());
+        let existing: Option<AssetRecord> = env.storage().persistent().get(&key);
+
+        match existing {
+            Some(record) if record.active => return Err(ContractError::AssetAlreadyActive),
+            Some(record) if record.issuer != issuer => return Err(ContractError::IssuerMismatch),
+            _ => {}
+        }
+
+        let record = AssetRecord {
+            asset: asset.clone(),
+            issuer: issuer.clone(),
+            active: true,
+        };
+        env.storage().persistent().set(&key, &record);
+
+        AssetRegistered { asset, issuer }.publish(&env);
+
+        Ok(())
+    }
+
+    pub fn deactivate_asset(env: Env, asset: Address) -> Result<(), ContractError> {
+        Self::require_initialized(&env)?;
+
+        let admin = Self::admin(env.clone());
+        admin.require_auth();
+
+        let key = DataKey::Asset(asset.clone());
+        let mut record: AssetRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::AssetNotFound)?;
+
+        if !record.active {
+            return Err(ContractError::AssetInactive);
+        }
+
+        record.active = false;
+        env.storage().persistent().set(&key, &record);
+
+        AssetDeactivated { asset }.publish(&env);
+
+        Ok(())
+    }
+
+    pub fn get_asset(env: Env, asset: Address) -> Option<AssetRecord> {
+        env.storage().persistent().get(&DataKey::Asset(asset))
+    }
+
+    pub fn is_asset_active(env: Env, asset: Address) -> bool {
+        Self::get_asset(env, asset)
+            .map(|record| record.active)
+            .unwrap_or(false)
     }
 
     fn require_initialized(env: &Env) -> Result<(), ContractError> {
