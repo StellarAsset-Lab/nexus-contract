@@ -1,6 +1,7 @@
 #![no_std]
 
 mod error;
+mod events;
 mod storage;
 mod types;
 
