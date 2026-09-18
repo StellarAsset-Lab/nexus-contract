@@ -1,8 +1,13 @@
 #![no_std]
 
+#[cfg(test)]
+extern crate std;
+
 mod error;
 mod events;
 mod storage;
+#[cfg(test)]
+mod test;
 mod types;
 
 use error::ContractError;
