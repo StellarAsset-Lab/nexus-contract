@@ -5,6 +5,7 @@ extern crate std;
 
 mod error;
 mod events;
+mod registry_interface;
 mod storage;
 #[cfg(test)]
 mod test;
@@ -16,6 +17,7 @@ use events::{
     AssetFunded, GatewayPaused, GatewayUnpaused, OrderCancelled, OrderCreated, OrderExpired,
     OrderSettled, PaymentFunded,
 };
+use registry_interface::RegistryClient;
 use soroban_sdk::token::TokenClient;
 use soroban_sdk::{contract, contractimpl, Address, Env};
 use storage::{extend_instance_ttl, extend_persistent_ttl, DataKey};
@@ -179,9 +181,9 @@ impl Order {
         }
     }
 
-    fn registry_client(env: &Env) -> nexus_registry::RegistryClient<'static> {
+    fn registry_client(env: &Env) -> RegistryClient<'static> {
         let registry = Self::registry(env.clone());
-        nexus_registry::RegistryClient::new(env, &registry)
+        RegistryClient::new(env, &registry)
     }
 
     #[allow(clippy::too_many_arguments)]
