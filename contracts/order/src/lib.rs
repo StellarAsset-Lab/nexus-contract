@@ -7,9 +7,10 @@ mod types;
 
 use error::ContractError;
 use events::{AdminTransferCancelled, AdminTransferProposed, AdminTransferred};
-use events::{GatewayPaused, GatewayUnpaused};
+use events::{GatewayPaused, GatewayUnpaused, OrderCreated};
 use soroban_sdk::{contract, contractimpl, Address, Env};
 use storage::DataKey;
+use types::{OrderRecord, OrderStatus};
 
 #[contract]
 pub struct Order;
@@ -166,5 +167,91 @@ impl Order {
     fn registry_client(env: &Env) -> nexus_registry::RegistryClient<'static> {
         let registry = Self::registry(env.clone());
         nexus_registry::RegistryClient::new(env, &registry)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_order(
+        env: Env,
+        distributor: Address,
+        buyer: Address,
+        asset: Address,
+        payment_asset: Address,
+        asset_amount: i128,
+        payment_amount: i128,
+        expires_at_ledger: u32,
+    ) -> Result<u64, ContractError> {
+        Self::require_initialized(&env)?;
+
+        if Self::is_paused(env.clone()) {
+            return Err(ContractError::Paused);
+        }
+
+        distributor.require_auth();
+
+        if asset_amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        if payment_amount <= 0 {
+            return Err(ContractError::InvalidAmount);
+        }
+        if expires_at_ledger <= env.ledger().sequence() {
+            return Err(ContractError::InvalidExpiry);
+        }
+
+        let registry = Self::registry_client(&env);
+
+        if !registry.is_asset_active(&asset) {
+            return Err(ContractError::AssetInactive);
+        }
+        if !registry.is_distribution_active(&asset, &distributor) {
+            return Err(ContractError::DistributionInactive);
+        }
+        if !registry.is_eligible(&asset, &distributor, &buyer) {
+            return Err(ContractError::BuyerNotEligible);
+        }
+
+        let eligibility = registry
+            .get_eligibility(&asset, &distributor, &buyer)
+            .ok_or(ContractError::BuyerNotEligible)?;
+        if expires_at_ledger > eligibility.valid_until_ledger {
+            return Err(ContractError::BuyerNotEligible);
+        }
+
+        let order_id: u64 = env.storage().instance().get(&DataKey::NextOrderId).unwrap();
+        env.storage()
+            .instance()
+            .set(&DataKey::NextOrderId, &(order_id + 1));
+
+        let record = OrderRecord {
+            id: order_id,
+            buyer: buyer.clone(),
+            distributor: distributor.clone(),
+            asset: asset.clone(),
+            payment_asset: payment_asset.clone(),
+            asset_amount,
+            payment_amount,
+            created_at_ledger: env.ledger().sequence(),
+            expires_at_ledger,
+            status: OrderStatus::Created,
+            payment_funded: false,
+            asset_funded: false,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::Order(order_id), &record);
+
+        OrderCreated {
+            order_id,
+            buyer,
+            distributor,
+            asset,
+            payment_asset,
+            asset_amount,
+            payment_amount,
+            expires_at_ledger,
+        }
+        .publish(&env);
+
+        Ok(order_id)
     }
 }
