@@ -9,9 +9,10 @@ use error::ContractError;
 use events::{AdminTransferCancelled, AdminTransferProposed, AdminTransferred};
 use events::{AssetDeactivated, AssetRegistered};
 use events::{DistributionRegistered, DistributionRevoked};
+use events::{EligibilityRevoked, EligibilitySet};
 use soroban_sdk::{contract, contractimpl, Address, Env};
 use storage::DataKey;
-use types::{AssetRecord, DistributionConfig};
+use types::{AssetRecord, DistributionConfig, EligibilityRecord};
 
 #[contract]
 pub struct Registry;
@@ -255,6 +256,111 @@ impl Registry {
         Self::get_distribution(env, asset, distributor)
             .map(|record| record.active)
             .unwrap_or(false)
+    }
+
+    pub fn set_eligibility(
+        env: Env,
+        asset: Address,
+        distributor: Address,
+        buyer: Address,
+        valid_until_ledger: u32,
+    ) -> Result<(), ContractError> {
+        Self::require_initialized(&env)?;
+
+        if !Self::is_asset_active(env.clone(), asset.clone()) {
+            return Err(ContractError::AssetInactive);
+        }
+
+        let distribution: DistributionConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Distribution(asset.clone(), distributor.clone()))
+            .ok_or(ContractError::DistributionNotFound)?;
+
+        if !distribution.active {
+            return Err(ContractError::DistributionInactive);
+        }
+
+        distribution.eligibility_authority.require_auth();
+
+        if valid_until_ledger < env.ledger().sequence() {
+            return Err(ContractError::InvalidEligibilityExpiry);
+        }
+
+        let key = DataKey::Eligibility(asset.clone(), distributor.clone(), buyer.clone());
+        let record = EligibilityRecord {
+            asset: asset.clone(),
+            distributor: distributor.clone(),
+            buyer: buyer.clone(),
+            valid_until_ledger,
+        };
+        env.storage().persistent().set(&key, &record);
+
+        EligibilitySet {
+            asset,
+            distributor,
+            buyer,
+            valid_until_ledger,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    pub fn revoke_eligibility(
+        env: Env,
+        asset: Address,
+        distributor: Address,
+        buyer: Address,
+    ) -> Result<(), ContractError> {
+        Self::require_initialized(&env)?;
+
+        let distribution: DistributionConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Distribution(asset.clone(), distributor.clone()))
+            .ok_or(ContractError::DistributionNotFound)?;
+
+        distribution.eligibility_authority.require_auth();
+
+        let key = DataKey::Eligibility(asset.clone(), distributor.clone(), buyer.clone());
+        if !env.storage().persistent().has(&key) {
+            return Err(ContractError::EligibilityNotFound);
+        }
+        env.storage().persistent().remove(&key);
+
+        EligibilityRevoked {
+            asset,
+            distributor,
+            buyer,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    pub fn get_eligibility(
+        env: Env,
+        asset: Address,
+        distributor: Address,
+        buyer: Address,
+    ) -> Option<EligibilityRecord> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Eligibility(asset, distributor, buyer))
+    }
+
+    pub fn is_eligible(env: Env, asset: Address, distributor: Address, buyer: Address) -> bool {
+        if !Self::is_asset_active(env.clone(), asset.clone()) {
+            return false;
+        }
+        if !Self::is_distribution_active(env.clone(), asset.clone(), distributor.clone()) {
+            return false;
+        }
+        match Self::get_eligibility(env.clone(), asset, distributor, buyer) {
+            Some(record) => env.ledger().sequence() <= record.valid_until_ledger,
+            None => false,
+        }
     }
 
     fn require_initialized(env: &Env) -> Result<(), ContractError> {
