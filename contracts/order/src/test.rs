@@ -1,10 +1,13 @@
 extern crate std;
 
 use crate::error::ContractError;
-use crate::events::{AssetFunded, OrderCreated, PaymentFunded};
+use crate::events::{
+    AssetFunded, OrderCancelled, OrderCreated, OrderExpired, OrderSettled, PaymentFunded,
+};
+use crate::types::OrderStatus;
 use crate::{Order, OrderClient};
 use nexus_registry::{Registry, RegistryClient};
-use soroban_sdk::testutils::{Address as _, Events as _};
+use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
 use soroban_sdk::token::{StellarAssetClient, TokenClient};
 use soroban_sdk::{Address, Env, Event as _};
 
@@ -88,6 +91,11 @@ impl Fixture {
             &payment_amount,
             &expires_at_ledger,
         )
+    }
+
+    fn fund_both(&self, order_id: u64) {
+        self.order.mock_all_auths().fund_payment(&order_id);
+        self.order.mock_all_auths().fund_asset(&order_id);
     }
 }
 
@@ -452,4 +460,353 @@ fn test_duplicate_asset_funding() {
 
     let result = fixture.order.mock_all_auths().try_fund_asset(&order_id);
     assert_eq!(result, Err(Ok(ContractError::AssetAlreadyFunded)));
+}
+
+#[test]
+fn test_settlement_before_both_sides_funded() {
+    let fixture = setup();
+    let order_id = fixture.create_order(500, 1000, 1_000);
+    fixture.order.mock_all_auths().fund_payment(&order_id);
+
+    let result = fixture.order.mock_all_auths().try_settle(&order_id);
+    assert_eq!(result, Err(Ok(ContractError::InvalidOrderStatus)));
+}
+
+#[test]
+fn test_successful_settlement() {
+    let fixture = setup();
+    let order_id = fixture.create_order(500, 1000, 1_000);
+    fixture.fund_both(order_id);
+
+    fixture.order.mock_all_auths().settle(&order_id);
+    let events = fixture
+        .env
+        .events()
+        .all()
+        .filter_by_contract(&fixture.order.address);
+
+    assert_eq!(
+        events,
+        std::vec![OrderSettled {
+            order_id,
+            buyer: fixture.buyer.clone(),
+            distributor: fixture.distributor.clone(),
+            asset_amount: 500,
+            payment_amount: 1000,
+        }
+        .to_xdr(&fixture.env, &fixture.order.address),],
+    );
+}
+
+#[test]
+fn test_settlement_status_update() {
+    let fixture = setup();
+    let order_id = fixture.create_order(500, 1000, 1_000);
+    fixture.fund_both(order_id);
+
+    fixture.order.mock_all_auths().settle(&order_id);
+
+    let record = fixture.order.get_order(&order_id).unwrap();
+    assert_eq!(record.status, OrderStatus::Settled);
+}
+
+#[test]
+fn test_exact_balance_changes_after_settlement() {
+    let fixture = setup();
+    let order_id = fixture.create_order(500, 1000, 1_000);
+    fixture.fund_both(order_id);
+
+    let asset_token = TokenClient::new(&fixture.env, &fixture.asset);
+    let payment_token = TokenClient::new(&fixture.env, &fixture.payment_asset);
+    let buyer_asset_before = asset_token.balance(&fixture.buyer);
+    let distributor_payment_before = payment_token.balance(&fixture.distributor);
+
+    fixture.order.mock_all_auths().settle(&order_id);
+
+    assert_eq!(
+        asset_token.balance(&fixture.buyer),
+        buyer_asset_before + 500
+    );
+    assert_eq!(
+        payment_token.balance(&fixture.distributor),
+        distributor_payment_before + 1000
+    );
+    assert_eq!(asset_token.balance(&fixture.order.address), 0);
+    assert_eq!(payment_token.balance(&fixture.order.address), 0);
+}
+
+#[test]
+fn test_settlement_failure_leaves_order_unchanged() {
+    let fixture = setup();
+    let order_id = fixture.create_order(500, 1000, 1_000);
+    fixture.order.mock_all_auths().fund_payment(&order_id);
+
+    let result = fixture.order.mock_all_auths().try_settle(&order_id);
+    assert!(result.is_err());
+
+    let record = fixture.order.get_order(&order_id).unwrap();
+    assert_eq!(record.status, OrderStatus::Created);
+    assert!(record.payment_funded);
+    assert!(!record.asset_funded);
+}
+
+#[test]
+fn test_payment_only_cancellation() {
+    let fixture = setup();
+    let order_id = fixture.create_order(500, 1000, 1_000);
+    fixture.order.mock_all_auths().fund_payment(&order_id);
+
+    let payment_token = TokenClient::new(&fixture.env, &fixture.payment_asset);
+    let buyer_before = payment_token.balance(&fixture.buyer);
+
+    fixture.order.mock_all_auths().cancel_order(&order_id);
+    let events = fixture
+        .env
+        .events()
+        .all()
+        .filter_by_contract(&fixture.order.address);
+
+    let record = fixture.order.get_order(&order_id).unwrap();
+    assert_eq!(record.status, OrderStatus::Cancelled);
+    assert_eq!(payment_token.balance(&fixture.buyer), buyer_before + 1000);
+    assert_eq!(payment_token.balance(&fixture.order.address), 0);
+
+    assert_eq!(
+        events,
+        std::vec![OrderCancelled {
+            order_id,
+            cancelled_by: fixture.buyer.clone(),
+        }
+        .to_xdr(&fixture.env, &fixture.order.address),],
+    );
+}
+
+#[test]
+fn test_asset_only_cancellation() {
+    let fixture = setup();
+    let order_id = fixture.create_order(500, 1000, 1_000);
+    fixture.order.mock_all_auths().fund_asset(&order_id);
+
+    let asset_token = TokenClient::new(&fixture.env, &fixture.asset);
+    let distributor_before = asset_token.balance(&fixture.distributor);
+
+    fixture.order.mock_all_auths().cancel_order(&order_id);
+    let events = fixture
+        .env
+        .events()
+        .all()
+        .filter_by_contract(&fixture.order.address);
+
+    let record = fixture.order.get_order(&order_id).unwrap();
+    assert_eq!(record.status, OrderStatus::Cancelled);
+    assert_eq!(
+        asset_token.balance(&fixture.distributor),
+        distributor_before + 500
+    );
+    assert_eq!(asset_token.balance(&fixture.order.address), 0);
+
+    assert_eq!(
+        events,
+        std::vec![OrderCancelled {
+            order_id,
+            cancelled_by: fixture.distributor.clone(),
+        }
+        .to_xdr(&fixture.env, &fixture.order.address),],
+    );
+}
+
+#[test]
+#[should_panic]
+fn test_wrong_cancellation_actor_rejection() {
+    let fixture = setup();
+    let order_id = fixture.create_order(500, 1000, 1_000);
+    fixture.order.mock_all_auths().fund_payment(&order_id);
+
+    // Only the buyer (the funded side) may authorize cancellation here;
+    // calling without any mocked auth must panic.
+    fixture.order.cancel_order(&order_id);
+}
+
+#[test]
+fn test_cancellation_with_neither_side_funded() {
+    let fixture = setup();
+    let order_id = fixture.create_order(500, 1000, 1_000);
+
+    let result = fixture.order.mock_all_auths().try_cancel_order(&order_id);
+    assert_eq!(result, Err(Ok(ContractError::NothingToCancel)));
+}
+
+#[test]
+fn test_cancellation_after_both_sides_funded() {
+    let fixture = setup();
+    let order_id = fixture.create_order(500, 1000, 1_000);
+    fixture.fund_both(order_id);
+
+    let result = fixture.order.mock_all_auths().try_cancel_order(&order_id);
+    assert_eq!(result, Err(Ok(ContractError::NotCancellable)));
+}
+
+#[test]
+fn test_payment_refund_on_expiry() {
+    let fixture = setup();
+    let order_id = fixture.create_order(500, 1000, 1_000);
+    fixture.order.mock_all_auths().fund_payment(&order_id);
+
+    let record = fixture.order.get_order(&order_id).unwrap();
+    fixture
+        .env
+        .ledger()
+        .set_sequence_number(record.expires_at_ledger + 1);
+
+    let payment_token = TokenClient::new(&fixture.env, &fixture.payment_asset);
+    let buyer_before = payment_token.balance(&fixture.buyer);
+
+    fixture.order.expire_order(&order_id);
+
+    assert_eq!(payment_token.balance(&fixture.buyer), buyer_before + 1000);
+    let updated = fixture.order.get_order(&order_id).unwrap();
+    assert_eq!(updated.status, OrderStatus::Expired);
+}
+
+#[test]
+fn test_asset_refund_on_expiry() {
+    let fixture = setup();
+    let order_id = fixture.create_order(500, 1000, 1_000);
+    fixture.order.mock_all_auths().fund_asset(&order_id);
+
+    let record = fixture.order.get_order(&order_id).unwrap();
+    fixture
+        .env
+        .ledger()
+        .set_sequence_number(record.expires_at_ledger + 1);
+
+    let asset_token = TokenClient::new(&fixture.env, &fixture.asset);
+    let distributor_before = asset_token.balance(&fixture.distributor);
+
+    fixture.order.expire_order(&order_id);
+
+    assert_eq!(
+        asset_token.balance(&fixture.distributor),
+        distributor_before + 500
+    );
+    let updated = fixture.order.get_order(&order_id).unwrap();
+    assert_eq!(updated.status, OrderStatus::Expired);
+}
+
+#[test]
+fn test_both_side_refund_on_expiry() {
+    let fixture = setup();
+    let order_id = fixture.create_order(500, 1000, 1_000);
+    fixture.fund_both(order_id);
+
+    let record = fixture.order.get_order(&order_id).unwrap();
+    fixture
+        .env
+        .ledger()
+        .set_sequence_number(record.expires_at_ledger + 1);
+
+    let asset_token = TokenClient::new(&fixture.env, &fixture.asset);
+    let payment_token = TokenClient::new(&fixture.env, &fixture.payment_asset);
+    let buyer_before = payment_token.balance(&fixture.buyer);
+    let distributor_before = asset_token.balance(&fixture.distributor);
+
+    fixture.order.expire_order(&order_id);
+    let events = fixture
+        .env
+        .events()
+        .all()
+        .filter_by_contract(&fixture.order.address);
+
+    assert_eq!(payment_token.balance(&fixture.buyer), buyer_before + 1000);
+    assert_eq!(
+        asset_token.balance(&fixture.distributor),
+        distributor_before + 500
+    );
+
+    assert_eq!(
+        events,
+        std::vec![OrderExpired {
+            order_id,
+            payment_refunded: true,
+            asset_refunded: true,
+        }
+        .to_xdr(&fixture.env, &fixture.order.address),],
+    );
+}
+
+#[test]
+fn test_no_funding_expiry() {
+    let fixture = setup();
+    let order_id = fixture.create_order(500, 1000, 1_000);
+
+    let record = fixture.order.get_order(&order_id).unwrap();
+    fixture
+        .env
+        .ledger()
+        .set_sequence_number(record.expires_at_ledger + 1);
+
+    fixture.order.expire_order(&order_id);
+
+    let updated = fixture.order.get_order(&order_id).unwrap();
+    assert_eq!(updated.status, OrderStatus::Expired);
+}
+
+#[test]
+fn test_early_expiry_rejection() {
+    let fixture = setup();
+    let order_id = fixture.create_order(500, 1000, 1_000);
+
+    let result = fixture.order.mock_all_auths().try_expire_order(&order_id);
+    assert_eq!(result, Err(Ok(ContractError::NotExpired)));
+}
+
+#[test]
+fn test_settled_order_cannot_expire() {
+    let fixture = setup();
+    let order_id = fixture.create_order(500, 1000, 1_000);
+    fixture.fund_both(order_id);
+    fixture.order.mock_all_auths().settle(&order_id);
+
+    let record = fixture.order.get_order(&order_id).unwrap();
+    fixture
+        .env
+        .ledger()
+        .set_sequence_number(record.expires_at_ledger + 1);
+
+    let result = fixture.order.mock_all_auths().try_expire_order(&order_id);
+    assert_eq!(result, Err(Ok(ContractError::InvalidOrderStatus)));
+}
+
+#[test]
+fn test_cancelled_order_cannot_expire() {
+    let fixture = setup();
+    let order_id = fixture.create_order(500, 1000, 1_000);
+    fixture.order.mock_all_auths().fund_payment(&order_id);
+    fixture.order.mock_all_auths().cancel_order(&order_id);
+
+    let record = fixture.order.get_order(&order_id).unwrap();
+    fixture
+        .env
+        .ledger()
+        .set_sequence_number(record.expires_at_ledger + 1);
+
+    let result = fixture.order.mock_all_auths().try_expire_order(&order_id);
+    assert_eq!(result, Err(Ok(ContractError::InvalidOrderStatus)));
+}
+
+#[test]
+fn test_expired_order_cannot_settle() {
+    let fixture = setup();
+    let order_id = fixture.create_order(500, 1000, 1_000);
+    fixture.fund_both(order_id);
+
+    let record = fixture.order.get_order(&order_id).unwrap();
+    fixture
+        .env
+        .ledger()
+        .set_sequence_number(record.expires_at_ledger + 1);
+    fixture.order.expire_order(&order_id);
+
+    let result = fixture.order.mock_all_auths().try_settle(&order_id);
+    assert_eq!(result, Err(Ok(ContractError::InvalidOrderStatus)));
 }
