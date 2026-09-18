@@ -8,9 +8,10 @@ mod types;
 use error::ContractError;
 use events::{AdminTransferCancelled, AdminTransferProposed, AdminTransferred};
 use events::{AssetDeactivated, AssetRegistered};
+use events::{DistributionRegistered, DistributionRevoked};
 use soroban_sdk::{contract, contractimpl, Address, Env};
 use storage::DataKey;
-use types::AssetRecord;
+use types::{AssetRecord, DistributionConfig};
 
 #[contract]
 pub struct Registry;
@@ -165,6 +166,93 @@ impl Registry {
 
     pub fn is_asset_active(env: Env, asset: Address) -> bool {
         Self::get_asset(env, asset)
+            .map(|record| record.active)
+            .unwrap_or(false)
+    }
+
+    pub fn register_distribution(
+        env: Env,
+        asset: Address,
+        distributor: Address,
+        eligibility_authority: Address,
+    ) -> Result<(), ContractError> {
+        Self::require_initialized(&env)?;
+
+        let admin = Self::admin(env.clone());
+        admin.require_auth();
+
+        if !Self::is_asset_active(env.clone(), asset.clone()) {
+            return Err(ContractError::AssetInactive);
+        }
+
+        let key = DataKey::Distribution(asset.clone(), distributor.clone());
+        let existing: Option<DistributionConfig> = env.storage().persistent().get(&key);
+
+        if let Some(record) = &existing {
+            if record.active {
+                return Err(ContractError::DistributionAlreadyActive);
+            }
+        }
+
+        let record = DistributionConfig {
+            asset: asset.clone(),
+            distributor: distributor.clone(),
+            eligibility_authority: eligibility_authority.clone(),
+            active: true,
+        };
+        env.storage().persistent().set(&key, &record);
+
+        DistributionRegistered {
+            asset,
+            distributor,
+            eligibility_authority,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    pub fn revoke_distribution(
+        env: Env,
+        asset: Address,
+        distributor: Address,
+    ) -> Result<(), ContractError> {
+        Self::require_initialized(&env)?;
+
+        let admin = Self::admin(env.clone());
+        admin.require_auth();
+
+        let key = DataKey::Distribution(asset.clone(), distributor.clone());
+        let mut record: DistributionConfig = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::DistributionNotFound)?;
+
+        if !record.active {
+            return Err(ContractError::DistributionInactive);
+        }
+
+        record.active = false;
+        env.storage().persistent().set(&key, &record);
+
+        DistributionRevoked { asset, distributor }.publish(&env);
+
+        Ok(())
+    }
+
+    pub fn get_distribution(
+        env: Env,
+        asset: Address,
+        distributor: Address,
+    ) -> Option<DistributionConfig> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Distribution(asset, distributor))
+    }
+
+    pub fn is_distribution_active(env: Env, asset: Address, distributor: Address) -> bool {
+        Self::get_distribution(env, asset, distributor)
             .map(|record| record.active)
             .unwrap_or(false)
     }
