@@ -7,7 +7,8 @@ mod types;
 
 use error::ContractError;
 use events::{AdminTransferCancelled, AdminTransferProposed, AdminTransferred};
-use events::{GatewayPaused, GatewayUnpaused, OrderCreated};
+use events::{GatewayPaused, GatewayUnpaused, OrderCreated, PaymentFunded};
+use soroban_sdk::token::TokenClient;
 use soroban_sdk::{contract, contractimpl, Address, Env};
 use storage::DataKey;
 use types::{OrderRecord, OrderStatus};
@@ -253,5 +254,51 @@ impl Order {
         .publish(&env);
 
         Ok(order_id)
+    }
+
+    pub fn fund_payment(env: Env, order_id: u64) -> Result<(), ContractError> {
+        Self::require_initialized(&env)?;
+
+        if Self::is_paused(env.clone()) {
+            return Err(ContractError::Paused);
+        }
+
+        let key = DataKey::Order(order_id);
+        let mut record: OrderRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::OrderNotFound)?;
+
+        if record.status != OrderStatus::Created {
+            return Err(ContractError::InvalidOrderStatus);
+        }
+        if env.ledger().sequence() > record.expires_at_ledger {
+            return Err(ContractError::OrderExpired);
+        }
+        if record.payment_funded {
+            return Err(ContractError::PaymentAlreadyFunded);
+        }
+
+        record.buyer.require_auth();
+
+        let token = TokenClient::new(&env, &record.payment_asset);
+        token.transfer(
+            &record.buyer,
+            &env.current_contract_address(),
+            &record.payment_amount,
+        );
+
+        record.payment_funded = true;
+        env.storage().persistent().set(&key, &record);
+
+        PaymentFunded {
+            order_id,
+            buyer: record.buyer,
+            payment_amount: record.payment_amount,
+        }
+        .publish(&env);
+
+        Ok(())
     }
 }
