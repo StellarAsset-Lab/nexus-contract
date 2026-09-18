@@ -162,4 +162,9 @@ impl Order {
             Err(ContractError::NotInitialized)
         }
     }
+
+    fn registry_client(env: &Env) -> nexus_registry::RegistryClient<'static> {
+        let registry = Self::registry(env.clone());
+        nexus_registry::RegistryClient::new(env, &registry)
+    }
 }
