@@ -7,7 +7,9 @@ mod types;
 
 use error::ContractError;
 use events::{AdminTransferCancelled, AdminTransferProposed, AdminTransferred};
-use events::{AssetFunded, GatewayPaused, GatewayUnpaused, OrderCreated, PaymentFunded};
+use events::{
+    AssetFunded, GatewayPaused, GatewayUnpaused, OrderCreated, OrderSettled, PaymentFunded,
+};
 use soroban_sdk::token::TokenClient;
 use soroban_sdk::{contract, contractimpl, Address, Env};
 use storage::DataKey;
@@ -342,6 +344,49 @@ impl Order {
             order_id,
             distributor: record.distributor,
             asset_amount: record.asset_amount,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    pub fn settle(env: Env, order_id: u64) -> Result<(), ContractError> {
+        Self::require_initialized(&env)?;
+
+        let key = DataKey::Order(order_id);
+        let mut record: OrderRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::OrderNotFound)?;
+
+        if record.status != OrderStatus::Created {
+            return Err(ContractError::InvalidOrderStatus);
+        }
+        if env.ledger().sequence() > record.expires_at_ledger {
+            return Err(ContractError::OrderExpired);
+        }
+        if !record.payment_funded || !record.asset_funded {
+            return Err(ContractError::InvalidOrderStatus);
+        }
+
+        let this_contract = env.current_contract_address();
+
+        let payment_token = TokenClient::new(&env, &record.payment_asset);
+        payment_token.transfer(&this_contract, &record.distributor, &record.payment_amount);
+
+        let asset_token = TokenClient::new(&env, &record.asset);
+        asset_token.transfer(&this_contract, &record.buyer, &record.asset_amount);
+
+        record.status = OrderStatus::Settled;
+        env.storage().persistent().set(&key, &record);
+
+        OrderSettled {
+            order_id,
+            buyer: record.buyer,
+            distributor: record.distributor,
+            asset_amount: record.asset_amount,
+            payment_amount: record.payment_amount,
         }
         .publish(&env);
 
