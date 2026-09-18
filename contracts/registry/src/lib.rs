@@ -11,7 +11,7 @@ use events::{AssetDeactivated, AssetRegistered};
 use events::{DistributionRegistered, DistributionRevoked};
 use events::{EligibilityRevoked, EligibilitySet};
 use soroban_sdk::{contract, contractimpl, Address, Env};
-use storage::DataKey;
+use storage::{extend_instance_ttl, extend_persistent_ttl, DataKey};
 use types::{AssetRecord, DistributionConfig, EligibilityRecord};
 
 #[contract]
@@ -29,15 +29,18 @@ impl Registry {
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Initialized, &true);
         env.storage().instance().remove(&DataKey::PendingAdmin);
+        extend_instance_ttl(&env);
 
         Ok(())
     }
 
     pub fn admin(env: Env) -> Address {
+        extend_instance_ttl(&env);
         env.storage().instance().get(&DataKey::Admin).unwrap()
     }
 
     pub fn pending_admin(env: Env) -> Option<Address> {
+        extend_instance_ttl(&env);
         env.storage().instance().get(&DataKey::PendingAdmin)
     }
 
@@ -130,6 +133,7 @@ impl Registry {
             active: true,
         };
         env.storage().persistent().set(&key, &record);
+        extend_persistent_ttl(&env, &key);
 
         AssetRegistered { asset, issuer }.publish(&env);
 
@@ -155,6 +159,7 @@ impl Registry {
 
         record.active = false;
         env.storage().persistent().set(&key, &record);
+        extend_persistent_ttl(&env, &key);
 
         AssetDeactivated { asset }.publish(&env);
 
@@ -162,7 +167,12 @@ impl Registry {
     }
 
     pub fn get_asset(env: Env, asset: Address) -> Option<AssetRecord> {
-        env.storage().persistent().get(&DataKey::Asset(asset))
+        let key = DataKey::Asset(asset);
+        let record: Option<AssetRecord> = env.storage().persistent().get(&key);
+        if record.is_some() {
+            extend_persistent_ttl(&env, &key);
+        }
+        record
     }
 
     pub fn is_asset_active(env: Env, asset: Address) -> bool {
@@ -202,6 +212,7 @@ impl Registry {
             active: true,
         };
         env.storage().persistent().set(&key, &record);
+        extend_persistent_ttl(&env, &key);
 
         DistributionRegistered {
             asset,
@@ -236,6 +247,7 @@ impl Registry {
 
         record.active = false;
         env.storage().persistent().set(&key, &record);
+        extend_persistent_ttl(&env, &key);
 
         DistributionRevoked { asset, distributor }.publish(&env);
 
@@ -247,9 +259,12 @@ impl Registry {
         asset: Address,
         distributor: Address,
     ) -> Option<DistributionConfig> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Distribution(asset, distributor))
+        let key = DataKey::Distribution(asset, distributor);
+        let record: Option<DistributionConfig> = env.storage().persistent().get(&key);
+        if record.is_some() {
+            extend_persistent_ttl(&env, &key);
+        }
+        record
     }
 
     pub fn is_distribution_active(env: Env, asset: Address, distributor: Address) -> bool {
@@ -295,6 +310,7 @@ impl Registry {
             valid_until_ledger,
         };
         env.storage().persistent().set(&key, &record);
+        extend_persistent_ttl(&env, &key);
 
         EligibilitySet {
             asset,
@@ -345,9 +361,12 @@ impl Registry {
         distributor: Address,
         buyer: Address,
     ) -> Option<EligibilityRecord> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Eligibility(asset, distributor, buyer))
+        let key = DataKey::Eligibility(asset, distributor, buyer);
+        let record: Option<EligibilityRecord> = env.storage().persistent().get(&key);
+        if record.is_some() {
+            extend_persistent_ttl(&env, &key);
+        }
+        record
     }
 
     pub fn is_eligible(env: Env, asset: Address, distributor: Address, buyer: Address) -> bool {
