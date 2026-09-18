@@ -1,8 +1,13 @@
 #![no_std]
 
+#[cfg(test)]
+extern crate std;
+
 mod error;
 mod events;
 mod storage;
+#[cfg(test)]
+mod test;
 mod types;
 
 use error::ContractError;
@@ -294,7 +299,7 @@ impl Order {
         let token = TokenClient::new(&env, &record.payment_asset);
         token.transfer(
             &record.buyer,
-            &env.current_contract_address(),
+            env.current_contract_address(),
             &record.payment_amount,
         );
 
@@ -341,7 +346,7 @@ impl Order {
         let token = TokenClient::new(&env, &record.asset);
         token.transfer(
             &record.distributor,
-            &env.current_contract_address(),
+            env.current_contract_address(),
             &record.asset_amount,
         );
 
