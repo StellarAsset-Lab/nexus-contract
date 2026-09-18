@@ -13,7 +13,7 @@ use events::{
 };
 use soroban_sdk::token::TokenClient;
 use soroban_sdk::{contract, contractimpl, Address, Env};
-use storage::DataKey;
+use storage::{extend_instance_ttl, extend_persistent_ttl, DataKey};
 use types::{OrderRecord, OrderStatus};
 
 #[contract]
@@ -34,27 +34,33 @@ impl Order {
         env.storage().instance().set(&DataKey::NextOrderId, &1u64);
         env.storage().instance().set(&DataKey::Initialized, &true);
         env.storage().instance().remove(&DataKey::PendingAdmin);
+        extend_instance_ttl(&env);
 
         Ok(())
     }
 
     pub fn admin(env: Env) -> Address {
+        extend_instance_ttl(&env);
         env.storage().instance().get(&DataKey::Admin).unwrap()
     }
 
     pub fn pending_admin(env: Env) -> Option<Address> {
+        extend_instance_ttl(&env);
         env.storage().instance().get(&DataKey::PendingAdmin)
     }
 
     pub fn registry(env: Env) -> Address {
+        extend_instance_ttl(&env);
         env.storage().instance().get(&DataKey::Registry).unwrap()
     }
 
     pub fn is_paused(env: Env) -> bool {
+        extend_instance_ttl(&env);
         env.storage().instance().get(&DataKey::Paused).unwrap()
     }
 
     pub fn next_order_id(env: Env) -> u64 {
+        extend_instance_ttl(&env);
         env.storage().instance().get(&DataKey::NextOrderId).unwrap()
     }
 
@@ -240,9 +246,9 @@ impl Order {
             payment_funded: false,
             asset_funded: false,
         };
-        env.storage()
-            .persistent()
-            .set(&DataKey::Order(order_id), &record);
+        let order_key = DataKey::Order(order_id);
+        env.storage().persistent().set(&order_key, &record);
+        extend_persistent_ttl(&env, &order_key);
 
         OrderCreated {
             order_id,
@@ -294,6 +300,7 @@ impl Order {
 
         record.payment_funded = true;
         env.storage().persistent().set(&key, &record);
+        extend_persistent_ttl(&env, &key);
 
         PaymentFunded {
             order_id,
@@ -340,6 +347,7 @@ impl Order {
 
         record.asset_funded = true;
         env.storage().persistent().set(&key, &record);
+        extend_persistent_ttl(&env, &key);
 
         AssetFunded {
             order_id,
@@ -381,6 +389,7 @@ impl Order {
 
         record.status = OrderStatus::Settled;
         env.storage().persistent().set(&key, &record);
+        extend_persistent_ttl(&env, &key);
 
         OrderSettled {
             order_id,
@@ -431,6 +440,7 @@ impl Order {
 
         record.status = OrderStatus::Cancelled;
         env.storage().persistent().set(&key, &record);
+        extend_persistent_ttl(&env, &key);
 
         OrderCancelled {
             order_id,
@@ -473,6 +483,7 @@ impl Order {
         let payment_refunded = record.payment_funded;
         let asset_refunded = record.asset_funded;
         env.storage().persistent().set(&key, &record);
+        extend_persistent_ttl(&env, &key);
 
         OrderExpired {
             order_id,
@@ -485,7 +496,12 @@ impl Order {
     }
 
     pub fn get_order(env: Env, order_id: u64) -> Option<OrderRecord> {
-        env.storage().persistent().get(&DataKey::Order(order_id))
+        let key = DataKey::Order(order_id);
+        let record: Option<OrderRecord> = env.storage().persistent().get(&key);
+        if record.is_some() {
+            extend_persistent_ttl(&env, &key);
+        }
+        record
     }
 
     pub fn order_exists(env: Env, order_id: u64) -> bool {
