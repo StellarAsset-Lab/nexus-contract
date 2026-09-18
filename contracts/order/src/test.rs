@@ -810,3 +810,80 @@ fn test_expired_order_cannot_settle() {
     let result = fixture.order.mock_all_auths().try_settle(&order_id);
     assert_eq!(result, Err(Ok(ContractError::InvalidOrderStatus)));
 }
+
+#[test]
+fn test_cross_contract_registry_and_token_integration() {
+    let env = Env::default();
+
+    let registry_admin = Address::generate(&env);
+    let registry_id = env.register(Registry, ());
+    let registry = RegistryClient::new(&env, &registry_id);
+    registry.mock_all_auths().initialize(&registry_admin);
+
+    let order_admin = Address::generate(&env);
+    let order_id = env.register(Order, ());
+    let order = OrderClient::new(&env, &order_id);
+    order
+        .mock_all_auths()
+        .initialize(&order_admin, &registry_id);
+
+    let payment_issuer = Address::generate(&env);
+    let payment_sac = env.register_stellar_asset_contract_v2(payment_issuer.clone());
+    let payment_asset = payment_sac.address();
+
+    let asset_issuer = Address::generate(&env);
+    let distribution_sac = env.register_stellar_asset_contract_v2(asset_issuer.clone());
+    let asset = distribution_sac.address();
+
+    let buyer = Address::generate(&env);
+    let distributor = Address::generate(&env);
+    let eligibility_authority = Address::generate(&env);
+
+    StellarAssetClient::new(&env, &payment_asset)
+        .mock_all_auths()
+        .mint(&buyer, &10_000);
+    StellarAssetClient::new(&env, &asset)
+        .mock_all_auths()
+        .mint(&distributor, &10_000);
+
+    registry
+        .mock_all_auths()
+        .register_asset(&asset, &asset_issuer);
+    registry
+        .mock_all_auths()
+        .register_distribution(&asset, &distributor, &eligibility_authority);
+    let valid_until_ledger = env.ledger().sequence() + 10_000;
+    registry
+        .mock_all_auths()
+        .set_eligibility(&asset, &distributor, &buyer, &valid_until_ledger);
+
+    let expires_at_ledger = env.ledger().sequence() + 1_000;
+    let created_order_id = order.mock_all_auths().create_order(
+        &distributor,
+        &buyer,
+        &asset,
+        &payment_asset,
+        &2_000i128,
+        &4_000i128,
+        &expires_at_ledger,
+    );
+
+    order.mock_all_auths().fund_payment(&created_order_id);
+    order.mock_all_auths().fund_asset(&created_order_id);
+    order.mock_all_auths().settle(&created_order_id);
+
+    let payment_token = TokenClient::new(&env, &payment_asset);
+    let asset_token = TokenClient::new(&env, &asset);
+
+    assert_eq!(payment_token.balance(&buyer), 10_000 - 4_000);
+    assert_eq!(payment_token.balance(&distributor), 4_000);
+    assert_eq!(asset_token.balance(&distributor), 10_000 - 2_000);
+    assert_eq!(asset_token.balance(&buyer), 2_000);
+    assert_eq!(payment_token.balance(&order.address), 0);
+    assert_eq!(asset_token.balance(&order.address), 0);
+
+    let record = order.get_order(&created_order_id).unwrap();
+    assert_eq!(record.status, OrderStatus::Settled);
+    assert!(record.payment_funded);
+    assert!(record.asset_funded);
+}
