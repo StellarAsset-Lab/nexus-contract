@@ -887,3 +887,107 @@ fn test_cross_contract_registry_and_token_integration() {
     assert!(record.payment_funded);
     assert!(record.asset_funded);
 }
+
+#[test]
+fn test_pause_does_not_block_settlement_of_a_fully_funded_valid_order() {
+    let fixture = setup();
+    let order_id = fixture.create_order(500, 1000, 1_000);
+    fixture.fund_both(order_id);
+
+    fixture.order.mock_all_auths().pause();
+    fixture.order.mock_all_auths().settle(&order_id);
+
+    let record = fixture.order.get_order(&order_id).unwrap();
+    assert_eq!(record.status, OrderStatus::Settled);
+}
+
+#[test]
+fn test_pause_does_not_block_cancellation() {
+    let fixture = setup();
+    let order_id = fixture.create_order(500, 1000, 1_000);
+    fixture.order.mock_all_auths().fund_payment(&order_id);
+
+    fixture.order.mock_all_auths().pause();
+    fixture.order.mock_all_auths().cancel_order(&order_id);
+
+    let record = fixture.order.get_order(&order_id).unwrap();
+    assert_eq!(record.status, OrderStatus::Cancelled);
+}
+
+#[test]
+fn test_pause_does_not_block_expiry() {
+    let fixture = setup();
+    let order_id = fixture.create_order(500, 1000, 1_000);
+
+    let record = fixture.order.get_order(&order_id).unwrap();
+    fixture
+        .env
+        .ledger()
+        .set_sequence_number(record.expires_at_ledger + 1);
+
+    fixture.order.mock_all_auths().pause();
+    fixture.order.expire_order(&order_id);
+
+    let updated = fixture.order.get_order(&order_id).unwrap();
+    assert_eq!(updated.status, OrderStatus::Expired);
+}
+
+#[test]
+fn test_later_registry_revocation_does_not_trap_a_valid_existing_escrow() {
+    let fixture = setup();
+    let order_id = fixture.create_order(500, 1000, 1_000);
+    fixture.fund_both(order_id);
+
+    fixture.registry.mock_all_auths().revoke_eligibility(
+        &fixture.asset,
+        &fixture.distributor,
+        &fixture.buyer,
+    );
+    fixture
+        .registry
+        .mock_all_auths()
+        .revoke_distribution(&fixture.asset, &fixture.distributor);
+
+    fixture.order.mock_all_auths().settle(&order_id);
+
+    let record = fixture.order.get_order(&order_id).unwrap();
+    assert_eq!(record.status, OrderStatus::Settled);
+}
+
+#[test]
+fn test_later_registry_deactivation_does_not_block_final_settlement_of_a_valid_order() {
+    let fixture = setup();
+    let order_id = fixture.create_order(500, 1000, 1_000);
+    fixture.fund_both(order_id);
+
+    fixture
+        .registry
+        .mock_all_auths()
+        .deactivate_asset(&fixture.asset);
+
+    fixture.order.mock_all_auths().settle(&order_id);
+
+    let record = fixture.order.get_order(&order_id).unwrap();
+    assert_eq!(record.status, OrderStatus::Settled);
+}
+
+#[test]
+fn test_read_apis() {
+    let fixture = setup();
+    let order_id = fixture.create_order(500, 1000, 1_000);
+
+    assert!(fixture.order.order_exists(&order_id));
+    assert!(!fixture.order.order_exists(&999));
+    assert_eq!(fixture.order.get_order(&999), None);
+
+    let record = fixture.order.get_order(&order_id).unwrap();
+    assert_eq!(record.id, order_id);
+    assert_eq!(record.buyer, fixture.buyer);
+    assert_eq!(record.distributor, fixture.distributor);
+    assert_eq!(record.asset, fixture.asset);
+    assert_eq!(record.payment_asset, fixture.payment_asset);
+
+    assert_eq!(fixture.order.next_order_id(), order_id + 1);
+    assert!(!fixture.order.is_paused());
+    assert_eq!(fixture.order.registry(), fixture.registry.address);
+}
