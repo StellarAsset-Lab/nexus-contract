@@ -7,6 +7,7 @@ mod types;
 
 use error::ContractError;
 use events::{AdminTransferCancelled, AdminTransferProposed, AdminTransferred};
+use events::{GatewayPaused, GatewayUnpaused};
 use soroban_sdk::{contract, contractimpl, Address, Env};
 use storage::DataKey;
 
@@ -116,6 +117,40 @@ impl Order {
         env.storage().instance().remove(&DataKey::PendingAdmin);
 
         AdminTransferCancelled { pending_admin }.publish(&env);
+
+        Ok(())
+    }
+
+    pub fn pause(env: Env) -> Result<(), ContractError> {
+        Self::require_initialized(&env)?;
+
+        let admin = Self::admin(env.clone());
+        admin.require_auth();
+
+        if Self::is_paused(env.clone()) {
+            return Err(ContractError::Paused);
+        }
+
+        env.storage().instance().set(&DataKey::Paused, &true);
+
+        GatewayPaused {}.publish(&env);
+
+        Ok(())
+    }
+
+    pub fn unpause(env: Env) -> Result<(), ContractError> {
+        Self::require_initialized(&env)?;
+
+        let admin = Self::admin(env.clone());
+        admin.require_auth();
+
+        if !Self::is_paused(env.clone()) {
+            return Err(ContractError::Paused);
+        }
+
+        env.storage().instance().set(&DataKey::Paused, &false);
+
+        GatewayUnpaused {}.publish(&env);
 
         Ok(())
     }
