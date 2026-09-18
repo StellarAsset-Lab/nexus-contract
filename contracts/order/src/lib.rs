@@ -8,7 +8,8 @@ mod types;
 use error::ContractError;
 use events::{AdminTransferCancelled, AdminTransferProposed, AdminTransferred};
 use events::{
-    AssetFunded, GatewayPaused, GatewayUnpaused, OrderCreated, OrderSettled, PaymentFunded,
+    AssetFunded, GatewayPaused, GatewayUnpaused, OrderCancelled, OrderCreated, OrderSettled,
+    PaymentFunded,
 };
 use soroban_sdk::token::TokenClient;
 use soroban_sdk::{contract, contractimpl, Address, Env};
@@ -387,6 +388,53 @@ impl Order {
             distributor: record.distributor,
             asset_amount: record.asset_amount,
             payment_amount: record.payment_amount,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    pub fn cancel_order(env: Env, order_id: u64) -> Result<(), ContractError> {
+        Self::require_initialized(&env)?;
+
+        let key = DataKey::Order(order_id);
+        let mut record: OrderRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::OrderNotFound)?;
+
+        if record.status != OrderStatus::Created {
+            return Err(ContractError::InvalidOrderStatus);
+        }
+        if env.ledger().sequence() > record.expires_at_ledger {
+            return Err(ContractError::OrderExpired);
+        }
+
+        let this_contract = env.current_contract_address();
+        let cancelled_by = match (record.payment_funded, record.asset_funded) {
+            (false, false) => return Err(ContractError::NothingToCancel),
+            (true, true) => return Err(ContractError::NotCancellable),
+            (true, false) => {
+                record.buyer.require_auth();
+                let token = TokenClient::new(&env, &record.payment_asset);
+                token.transfer(&this_contract, &record.buyer, &record.payment_amount);
+                record.buyer.clone()
+            }
+            (false, true) => {
+                record.distributor.require_auth();
+                let token = TokenClient::new(&env, &record.asset);
+                token.transfer(&this_contract, &record.distributor, &record.asset_amount);
+                record.distributor.clone()
+            }
+        };
+
+        record.status = OrderStatus::Cancelled;
+        env.storage().persistent().set(&key, &record);
+
+        OrderCancelled {
+            order_id,
+            cancelled_by,
         }
         .publish(&env);
 
