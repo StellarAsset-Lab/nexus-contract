@@ -13,6 +13,3 @@ nexus-registry = { path = "../registry" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
-
-[features]
-testutils = ["soroban-sdk/testutils", "nexus-registry/testutils"]
