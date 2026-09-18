@@ -483,4 +483,12 @@ impl Order {
 
         Ok(())
     }
+
+    pub fn get_order(env: Env, order_id: u64) -> Option<OrderRecord> {
+        env.storage().persistent().get(&DataKey::Order(order_id))
+    }
+
+    pub fn order_exists(env: Env, order_id: u64) -> bool {
+        env.storage().persistent().has(&DataKey::Order(order_id))
+    }
 }
