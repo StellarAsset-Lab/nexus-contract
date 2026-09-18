@@ -8,8 +8,8 @@ mod types;
 use error::ContractError;
 use events::{AdminTransferCancelled, AdminTransferProposed, AdminTransferred};
 use events::{
-    AssetFunded, GatewayPaused, GatewayUnpaused, OrderCancelled, OrderCreated, OrderSettled,
-    PaymentFunded,
+    AssetFunded, GatewayPaused, GatewayUnpaused, OrderCancelled, OrderCreated, OrderExpired,
+    OrderSettled, PaymentFunded,
 };
 use soroban_sdk::token::TokenClient;
 use soroban_sdk::{contract, contractimpl, Address, Env};
@@ -435,6 +435,49 @@ impl Order {
         OrderCancelled {
             order_id,
             cancelled_by,
+        }
+        .publish(&env);
+
+        Ok(())
+    }
+
+    pub fn expire_order(env: Env, order_id: u64) -> Result<(), ContractError> {
+        Self::require_initialized(&env)?;
+
+        let key = DataKey::Order(order_id);
+        let mut record: OrderRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ContractError::OrderNotFound)?;
+
+        if record.status != OrderStatus::Created {
+            return Err(ContractError::InvalidOrderStatus);
+        }
+        if env.ledger().sequence() <= record.expires_at_ledger {
+            return Err(ContractError::NotExpired);
+        }
+
+        let this_contract = env.current_contract_address();
+
+        if record.payment_funded {
+            let token = TokenClient::new(&env, &record.payment_asset);
+            token.transfer(&this_contract, &record.buyer, &record.payment_amount);
+        }
+        if record.asset_funded {
+            let token = TokenClient::new(&env, &record.asset);
+            token.transfer(&this_contract, &record.distributor, &record.asset_amount);
+        }
+
+        record.status = OrderStatus::Expired;
+        let payment_refunded = record.payment_funded;
+        let asset_refunded = record.asset_funded;
+        env.storage().persistent().set(&key, &record);
+
+        OrderExpired {
+            order_id,
+            payment_refunded,
+            asset_refunded,
         }
         .publish(&env);
 
